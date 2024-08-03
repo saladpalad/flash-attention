@@ -171,7 +171,6 @@ __global__ void forward_kernel(float* Q, float *K, float *V, float* O, float* l,
 			}
 			__syncthreads();
 
-
 		}
 
 	}
