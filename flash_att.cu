@@ -1,3 +1,4 @@
+#include <torch/extension.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <math.h>
@@ -176,12 +177,32 @@ __global__ void forward_kernel(float* Q, float *K, float *V, float* O, float* l,
 	}
 
 }
-int main(){
 
+torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::Tensor O, torch::Tensor l, torch::Tensor m, int M, int N, int d) {
+	const int threads_per_block = 16;
+	const dim3 blocks((N + threads_per_block - 1) / threads_per_block, (N + threads_per_block - 1) / threads_per_block);
 
-	return 0;
+	int b_c = ceilf(M/4*d);
+	int b_r = min(static_cast<int>(ceilf(M/4*d)), d);
+	int q_block_size = b_r * d;
+	int kv_block_size = b_c * d;
+	int s_block_size = b_r * b_c;
+
+	const int shared_mem_size = (q_block_size + 2*kv_block_size + q_block_size + 2*b_r + s_block_size + 4*b_r) * 4;
+
+	forward_kernel<<<blocks, dim3(threads_per_block, threads_per_block), shared_mem_size>>>(
+		Q.data_ptr<float>(),
+		K.data_ptr<float>(),
+		V.data_ptr<float>(),
+		O.data_ptr<float>(),
+		l.data_ptr<float>(),
+		m.data_ptr<float>(),
+		M, N, d
+	);
+
+	return O;
 }
 
-
-
-
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("forward", &forward, "Flash Attention forward");
+}
