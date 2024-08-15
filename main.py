@@ -20,7 +20,8 @@ def main():
     print(O)
     # If you need to use the results, you can access them through the PyTorch tensors
     # For example:
-    # result = O.cpu().numpy()
+    #result = O.cpu().numpy()
+    #print(result)
 
 if __name__ == "__main__":
     main()
