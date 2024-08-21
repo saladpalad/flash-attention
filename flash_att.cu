@@ -18,8 +18,6 @@ __global__ void forward_kernel(float* Q, float *K, float *V, float* O, float* l,
 	int kv_block_size = b_c * d;
 	int s_block_size = b_r * b_c;
 
-	//int row = blockIdx.x * blockDim.x + threadIdx.x;
-	//int col = blockIdx.y * blockDim.y + threadIdx.y;
 	int tid = threadIdx.x + threadIdx.y * blockDim.x;
 	
 	extern __shared__ float sram[];
@@ -27,16 +25,28 @@ __global__ void forward_kernel(float* Q, float *K, float *V, float* O, float* l,
 	// allocate SRAM  partitions
 	float* q_i = sram;
 	float* k_j = &sram[q_block_size];
-       	float* v_j = &sram[q_block_size + kv_block_size];
+    float* v_j = &sram[q_block_size + kv_block_size];
 	float* o_i = &sram[q_block_size + 2*kv_block_size];
 	float* l_i = &sram[q_block_size + 2*kv_block_size + q_block_size];
 	float* m_i = &sram[q_block_size + 2*kv_block_size + q_block_size + b_r];
 	float* S = &sram[q_block_size + 2*kv_block_size + q_block_size + 2*b_r];
-	float* row_m = &sram[q_block_size + 2*kv_block_size + q_block_size + 2*b_r + s_block_size];
-	float* row_l = &sram[q_block_size + 2*kv_block_size + q_block_size + 2*b_r + s_block_size + b_r];
-	float* new_row_m = &sram[q_block_size + 2*kv_block_size + q_block_size + 2*b_r + s_block_size + 2*b_r];
-	float* new_row_l = &sram[q_block_size + 2*kv_block_size + q_block_size + 2*b_r + s_block_size + 3*b_r];
 
+	float m_ij[b_r];
+	float l_ij[b_r];
+	float p_ij[b_r * b_c];
+	float m_new[b_r];
+	float l_new[b_r];
+
+    if (tid < b_r) {
+        m_ij[tid] = -INFINITY;
+        l_ij[tid] = 0;
+		m_new[tid] = 0;
+		l_new[tid] = 0;
+    }
+    
+    for (int i = tid; i < b_r * b_c; i += blockDim.x * gridDim.x) {
+        p_ij[i] = 0;
+    }
 	
 	for(int i = 0; i < t_c; i++){
 		
@@ -69,140 +79,77 @@ __global__ void forward_kernel(float* Q, float *K, float *V, float* O, float* l,
 					m_i[local_k] = m[index];
 				}	
 			}
-
-			// implement logic of the computations
-	
-			//initialize row_m	
-			for(int r = threadIdx.y; r < b_r; r +=blockDim.y){
-				row_m[r] = -INFINITY;	
-			}	
-
 			__syncthreads();
 
-			// S = Q*K^T, row_m = row_max(S)	
-			for (int idx = blockDim.x * threadIdx.y + threadIdx.x; idx < s_block_size; idx += blockDim.x * blockDim.y){
-				int r = idx/b_c;
-				int c = idx % b_c;
-				float sum = 0;
-				
-				for(int k = 0; k < d; k++){
-					sum += q_i[r*d + k] * k_j[k*d + c];	
+			
+			int row = blockIdx.x * blockDim.x + threadIdx.x;
+
+
+			// S_ij = Q_i*K_j^T, m_ij = row_max(S_ij)
+			if (row < b_r) {
+				float row_max = -INFINITY;
+				for(int c = 0; c < b_c; c++){
+					float dot_prod = 0;
+					for(int k = 0; k < d; k++){
+						dot_prod += q_i[row*d + k] * k_j[c*d + k];
+					}
+					S[row*b_c + c] = dot_prod;
+					row_max = max(dot_prod, row_max);
 				}
-				S[idx] = sum;
-				if(sum > row_m[r]) row_m[r] = sum;	
-			
-			}	
-			__syncthreads();
-			
-			/*
-			for(int r =threadIdx.y; r < b_r; r+=blockDim.y){
-				row_l[r] = 0;	
+				m_ij[row] = row_max;
 			}
-			*/		
 			
-			//fix this row_l should be an array		
-			// P = exp(S - r w_m), row_l = rowsum(P)
-			//float row_l = 0;
-			for(int r = threadIdx.y; r < b_r; r += blockDim.y){
-				float sum = 0;	
-				for(int c = threadIdx.x; c < b_c; c += blockDim.x){
-					int idx = r * b_c + c;
-					float p = __expf(S[idx] - row_m[r]);
-					//S[idx] = p;
-					sum += p;	
-				}
-				row_l[r] = sum;
-			}
-			__syncthreads();
+			// P_ij = exp(S_ij - m_ij), l_ij = rowsum(P_ij)
+			if(row < b_r){
+				float row_sum = 0;
+				for(int c = 0; c < b_c; c++){
+					int idx = row*b_c + c;
+					float S_ij = S[idx];
+					float m_ij = m_ij[row];
+					float exp_val = __expf(S_ij - m_ij);
 
+					p_ij[idx] = exp_val;
+					row_sum += exp_val;
+				}
+				l_ij[row] = row_sum;
+			}
+			
 			// compute m_new, l_new
-			for(int r = threadIdx.y; r < b_r; r += blockDim.y){
-				if(threadIdx.x == 0){ // one thread per row
-					float m_i = m[blockIdx.y * b_r + r]; // global max for row i out of all the blocks processed so far
-					float m_ij = row_m[r]; //local max for this block
+			if(row < b_r){
+				float m_i_prev = m_i[row];
+				float m_ij = m_ij[row];
+				float m_i_new = max(m_i_prev, m_ij);
+				m_new[row] = m_i_new;
 
-					new_row_m[r] = max(m_i, m_ij);
-
-
-
-					float l_i = l[blockIdx.y * b_r + r]; //global running sum
-					float l_ij = row_l[r]; // local running sum
-					float new_m_i = new_row_m[r];
-					
-
-					new_row_l[r] = __expf(m_i - new_m_i) * l_i + __expf(m_ij - new_m_i) * l_ij;
-
-					//o_i[r] = 1/(new_row_l[r]) * (__expf(m_i - new_m_i)*o_i[r] + __expf(m_ij - new_m_i)*
-				}
+				float l_i_prev = l_i[row];
+				float l_ij = l_ij[row];
+				float l_i_new = __expf(m_i_prev - m_i_new) * l_i_prev + __expf(m_ij - m_i_new) * l_ij;
+				l_new[row] = l_i_new;
 			}
-			__syncthreads();
 			
-			// compute Oi 
-			for(int r = threadIdx.y; r < b_r; r+= blockDim.y){
-				for(int c = threadIdx.x; c < d; c += blockDim.x){
-					int idx = r * d + c;	
-					
-					float m_i = m[blockIdx.y * b_r + r];
-					float m_ij = row_m[r];
-					float new_m_i = new_row_m[r];
-					float p_ij = __expf(S[idx] - m_ij);
-					float l_i = l[blockIdx.y * b_r + r];
-					float new_l_i = new_row_l[r];
-				
-					//int global_idx = (blockIdx.y *b_r +r)*d + c;	
-					
-					// maybe we can write to O on HBM instead				
-					o_i[idx] = 1/(new_l_i) * ( l_i * __expf(m_i - new_m_i)*o_i[idx] + __expf(m_ij - new_m_i) * p_ij * v_j[c*b_c + r]);
-				
+			// Write O_i, l_i, m_i to HBM
+			if(row < b_r){
+				float l_new_val = l_new[row];
+				float m_i_prev = m_i[row];
+				float m_ij_curr = m_ij[row];
+				float m_new_val = m_new[row];
+				float l_i_prev = l_i[row];
+				float l_ij_curr = l_ij[row];
+
+				for(int c = 0; c < d; c++){  // Note: iterating over d, not b_c
+					float prev_O_i = o_i[row * d + c];
+					float v_j = v_j[row * d + c];  // Assuming v_j is transposed
+					o_i[row * d + c] = (1.0f / l_new_val) * 
+						(l_i_prev * __expf(m_i_prev - m_new_val) * prev_O_i + 
+						__expf(m_ij_curr - m_new_val) * l_ij_curr * v_j);
 				}
 				
-				// write l, m to HBM	
-				if(threadIdx.x == 0){
-					int idx = blockIdx.y*b_r + r;
-					m[idx] = new_row_m[r];
-					l[idx] = new_row_l[r];	
-				}	
+				m_i[row] = m_new_val;
+				l_i[row] = l_new_val;
 			}
-			__syncthreads();
-
-			// write O to HBM
-			for(int local_k = tid; local_k < q_block_size; local_k += blockDim.x*blockDim.y){
-				int idx = j*q_block_size + local_k;	
-				if (idx < N*d) O[idx] = o_i[local_k];	
-			}
-			__syncthreads();
-
+			
 		}
 
 	}
 
-}
-
-torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::Tensor O, torch::Tensor l, torch::Tensor m, int M, int N, int d) {
-	const int threads_per_block = 16;
-	const dim3 blocks((N + threads_per_block - 1) / threads_per_block, (N + threads_per_block - 1) / threads_per_block);
-
-	int b_c = ceilf(M/4*d);
-	int b_r = min(static_cast<int>(ceilf(M/4*d)), d);
-	int q_block_size = b_r * d;
-	int kv_block_size = b_c * d;
-	int s_block_size = b_r * b_c;
-
-	const int shared_mem_size = (q_block_size + 2*kv_block_size + q_block_size + 2*b_r + s_block_size + 4*b_r) * 4;
-
-	forward_kernel<<<blocks, dim3(threads_per_block, threads_per_block), shared_mem_size>>>(
-		Q.data_ptr<float>(),
-		K.data_ptr<float>(),
-		V.data_ptr<float>(),
-		O.data_ptr<float>(),
-		l.data_ptr<float>(),
-		m.data_ptr<float>(),
-		M, N, d
-	);
-
-	return O;
-}
-
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("forward", &forward, "Flash Attention forward");
 }
