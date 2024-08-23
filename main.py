@@ -1,7 +1,9 @@
 import torch
 import math
 import torch.nn.functional as F
-import flash_attention
+from torch.utils.cpp_extension import load
+
+flash_attention = load(name='flash_attention', sources=['flash_att.cu'], extra_cuda_cflags=['-O2'])
 
 def naive_attn(q, k, v):
     att = (q @ k.transpose(-2, -1) * (1.0 / math.sqrt(k.size(-1))))
@@ -23,6 +25,7 @@ def main():
     naive_result = naive_attn(Q, K, V)
     flash_result = flash_attention.forward(Q, K, V, O, l, m, M, N, d)
     print(flash_result)
+    print('attn values sanity check:', torch.allclose(flash_result, naive_result, rtol=0, atol=1e-02))
 
 if __name__ == "__main__":
     main()

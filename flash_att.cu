@@ -23,7 +23,7 @@ __global__ void forward_kernel(float* Q, float *K, float *V, float* O, float* l,
 	int q_block_size = b_r * d;
 	int kv_block_size = b_c * d;
 
-	int tid = threadIdx.x + threadIdx.y * blockDim.x;
+	int tid = threadIdx.x;
 	int row = blockIdx.x * blockDim.x + threadIdx.x;
 	extern __shared__ float sram[];
 	
@@ -54,31 +54,25 @@ __global__ void forward_kernel(float* Q, float *K, float *V, float* O, float* l,
     }
 	
 	for(int i = 0; i < t_c; i++){
-		
-		// Load Kj, Vj blocks from HBM to SRAM
-		for(int local_j = tid; local_j < kv_block_size; local_j += blockDim.x * blockDim.y){
+		// Load K_j, V_j blocks from HBM to SRAM
+		for(int local_j = tid; local_j < kv_block_size; local_j += blockDim.x){
 			int index = i * kv_block_size +	local_j;	
 			if(index < N*d){
 				k_j[local_j] = K[index];
 				v[local_j] = V[index];	
 			}	
 		}	
-
-
 		for(int j = 0; j < t_r; j++){
-
-			// Load Qi, Oi from HBM to SRAM
-			for(int local_k = tid; local_k < q_block_size; local_k += blockDim.x * blockDim.y){
+			// Load Q_i, O_i from HBM to SRAM
+			for(int local_k = tid; local_k < q_block_size; local_k += blockDim.x){
 				int index = j * q_block_size + local_k;	
 				if(index < N*d){
 					q_i[local_k] = Q[index];
 					o_i[local_k] = O[index];
 				}	
 			}
-
-		
-			// Load li, mi from HBM to SRAM	
-			for(int local_k = tid; local_k < b_r; local_k += blockDim.x * blockDim.y){
+			// Load l_i, m_i from HBM to SRAM	
+			for(int local_k = tid; local_k < b_r; local_k += blockDim.x){
 				int index = j * q_block_size + local_k;	
 				if(index < N){
 					l_i[local_k] = l[index];
@@ -136,9 +130,10 @@ __global__ void forward_kernel(float* Q, float *K, float *V, float* O, float* l,
 					// Update l and m in global memory
 					l[global_row] = l_new[row];
 					m[global_row] = m_new[row];
+
 					// Update O in global memory
 					for(int k = 0; k < d; k++) {
-						float new_O_i = 0.0f;
+						float new_O_i = 0;
 						for(int c = 0; c < b_c; c++) {
 						int global_col = i * b_c + c;
 							if(global_col < N) {
@@ -159,7 +154,7 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
     const int t_r = (N + b_r - 1) / b_r; // ceil(N/b_r)
     const int t_c = (N + b_c - 1) / b_c; // ceil(N/b_c)
 
-    dim3 grid_size(t_r, t_c);  
+    dim3 grid_size(1,1); // usually batch_size * num_head 
     dim3 block_size(b_r);  
 
     // Calculate shared memory size
