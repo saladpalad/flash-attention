@@ -10,16 +10,8 @@
 #define b_r 32
 #define b_c 32 
 
-__global__ void forward_kernel(float* Q, float *K, float *V, float* O, float* l, float* m, int M, int N, int d, const int t_r, const int t_c){
+__global__ void forward_kernel(float* Q, float *K, float *V, float* O, float* l, float* m, int M, int N, int d, const int t_r, const int t_c, const float dot_prod_scale){
 	
-	// tile dimensions	
-	//int b_c = ceilf(M/4*d);
-	//int b_r = min(static_cast<int>(ceilf(M/4*d)), d);
-	
-	// num of tiles
-	//int t_r = ceilf(N/b_r);
-	//int t_c = ceilf(N/b_c);
-
 	int q_block_size = b_r * d;
 	int kv_block_size = b_c * d;
 
@@ -89,11 +81,13 @@ __global__ void forward_kernel(float* Q, float *K, float *V, float* O, float* l,
 					for(int k = 0; k < d; k++){
 						dot_prod += q_i[row*d + k] * k_j[c*d + k];
 					}
+					dot_prod *= dot_prod_scale;
 					S[row*b_c + c] = dot_prod;
 					local_max = max(dot_prod, local_max);
 				}
 				row_max[row] = local_max;
 			}
+			__syncthreads();
 			
 			// P_ij = exp(S_ij - row_max), l_ij = rowsum(P_ij)
 			if(row < b_r){
@@ -153,6 +147,8 @@ __global__ void forward_kernel(float* Q, float *K, float *V, float* O, float* l,
 torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::Tensor O, torch::Tensor l, torch::Tensor m, int M, int N, int d) {
     const int t_r = (N + b_r - 1) / b_r; // ceil(N/b_r)
     const int t_c = (N + b_c - 1) / b_c; // ceil(N/b_c)
+	
+	const float dot_prod_scale = 1/sqrt(d);
 
     dim3 grid_size(1,1); // usually batch_size * num_head 
     dim3 block_size(b_r);  
@@ -176,11 +172,12 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::
         O.data_ptr<float>(),
         l.data_ptr<float>(),
         m.data_ptr<float>(),
-        M, N, d, t_r, t_c
+        M, N, d, t_r, t_c, dot_prod_scale
     );
 
     return O;
 }
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("forward", &forward, "Flash Attention forward");
 }
