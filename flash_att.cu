@@ -1,3 +1,4 @@
+#include <torch/extension.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <math.h>
@@ -6,19 +7,21 @@
 #include <iostream>
 #include <cmath>
 
-__global__ void forward_kernel(float* Q, float *K, float *V, float* O, float* l, float* m, int M, int N, int d){
+#define b_r 32
+#define b_c 32 
+
+__global__ void forward_kernel(float* Q, float *K, float *V, float* O, float* l, float* m, int M, int N, int d, const int t_r, const int t_c){
 	
 	// tile dimensions	
-	int b_c = ceilf(M/4*d);
-	int b_r = min(static_cast<int>(ceilf(M/4*d)), d);
+	//int b_c = ceilf(M/4*d);
+	//int b_r = min(static_cast<int>(ceilf(M/4*d)), d);
 	
 	// num of tiles
-	int t_r = ceilf(N/b_r);
-	int t_c = ceilf(N/b_c);
+	//int t_r = ceilf(N/b_r);
+	//int t_c = ceilf(N/b_c);
 
 	int q_block_size = b_r * d;
 	int kv_block_size = b_c * d;
-	int s_block_size = b_r * b_c;
 
 	int tid = threadIdx.x + threadIdx.y * blockDim.x;
 	int row = blockIdx.x * blockDim.x + threadIdx.x;
@@ -126,28 +129,63 @@ __global__ void forward_kernel(float* Q, float *K, float *V, float* O, float* l,
 				l_new[row] = l_i_new;
 			}
 			
-			// Write O_i, l_i, m_i to HBM
-			if(row < b_r){
-				float l_new_val = l_new[row];
-				float m_i_prev = m_i[row];
-				float m_ij = row_max[row];
-				float m_new_val = m_new[row];
-				float l_i_prev = l_i[row];
-				float l_ij = row_sum[row];
-				for(int c = 0; c < b_c; c++){  
-					for(int k = 0; k < d; k++){
-						float prev_O_i = o_i[row * d + k];							
-						float v_j = v[c * d + k];  
-						float P_ij = P[row * b_c + c];
-						o_i[row * d + k] = (1.0f / l_new_val) * (l_i_prev * __expf(m_i_prev - m_new_val) * prev_O_i + __expf(m_ij - m_new_val) * l_ij * P_ij * v_j);
+			// Write O, l, m to HBM
+			if(row < b_r) {
+				int global_row = j * b_r + row;
+				if(global_row < N) {
+					// Update l and m in global memory
+					l[global_row] = l_new[row];
+					m[global_row] = m_new[row];
+					// Update O in global memory
+					for(int k = 0; k < d; k++) {
+						float new_O_i = 0.0f;
+						for(int c = 0; c < b_c; c++) {
+						int global_col = i * b_c + c;
+							if(global_col < N) {
+								float v_j = v[c * d + k];
+								float P_ij = P[row * b_c + c];
+								new_O_i += P_ij * v_j;
+							}
+						}
+						O[global_row * d + k] = (1.0f / l_new[row]) * (l_i[row] * __expf(m_i[row] - m_new[row]) * o_i[row * d + k] + __expf(row_max[row] - m_new[row]) * new_O_i);
 					}
-				}	
-					
-				m_i[row] = m_new_val;
-				l_i[row] = l_new_val;
+				}
+			}
 		}
 	}
-
 }
 
+torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::Tensor O, torch::Tensor l, torch::Tensor m, int M, int N, int d) {
+    const int t_r = (N + b_r - 1) / b_r; // ceil(N/b_r)
+    const int t_c = (N + b_c - 1) / b_c; // ceil(N/b_c)
 
+    dim3 grid_size(t_r, t_c);  
+    dim3 block_size(b_r);  
+
+    // Calculate shared memory size
+    int q_block_size = b_r * d;
+    int kv_block_size = b_c * d;
+    int s_block_size = b_r * b_c;
+    const int shared_mem_size = (q_block_size + 2*kv_block_size + q_block_size + 2*b_r + s_block_size) * sizeof(float);
+
+    // Check shared memory size
+    int max_sram_size;
+    cudaDeviceGetAttribute(&max_sram_size, cudaDevAttrMaxSharedMemoryPerBlock, 0);
+    printf("Max shared memory: %d, requested shared memory: %d\n", max_sram_size, shared_mem_size);
+
+    // Launch kernel
+    forward_kernel<<<grid_size, block_size, shared_mem_size>>>(
+        Q.data_ptr<float>(),
+        K.data_ptr<float>(),
+        V.data_ptr<float>(),
+        O.data_ptr<float>(),
+        l.data_ptr<float>(),
+        m.data_ptr<float>(),
+        M, N, d, t_r, t_c
+    );
+
+    return O;
+}
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("forward", &forward, "Flash Attention forward");
+}
