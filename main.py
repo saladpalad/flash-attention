@@ -23,11 +23,7 @@ def plot_and_save_attention_diff(flash_result, naive_result, filename='attention
     
     print(f"Plot saved as {filepath}")
 
-def time_cuda_function(func, *args, num_warmup=1, num_runs=3):
-    # Warmup
-    for _ in range(num_warmup):
-        _ = func(*args)
-    
+def time_cuda_function(func, *args, num_runs=1):
     # Timing
     torch.cuda.synchronize()
     start_event = torch.cuda.Event(enable_timing=True)
@@ -50,13 +46,13 @@ def naive_attn(q, k, v):
     return y
 
 def main():
-    M = 64
-    N = 64
-    d = 12
-    Q = torch.randn((N,d), device='cuda')
-    K = torch.randn((N,d), device='cuda')
-    V = torch.randn((N,d), device='cuda')
-    O = torch.zeros((N,d), device='cuda')
+    # M - query seq length, N - key/val seq length, d - head dim
+    batch_size, n_head, M, N, d = 1, 1, 64, 64, 64 
+    
+    Q = torch.randn((M, d), device='cuda')
+    K = torch.randn((N, d), device='cuda')
+    V = torch.randn((N, d), device='cuda')
+    O = torch.zeros((N, d), device='cuda')
     l = torch.zeros((N,1), device='cuda')
     m = torch.full((N,1), -float('inf'), device='cuda')
     
@@ -64,11 +60,11 @@ def main():
     
     # Time naive attention
     naive_result, naive_time = time_cuda_function(naive_attn, Q, K, V)
-    print(f"Naive attention average time: {naive_time:.4f} ms")
+    print(f"Naive attention time: {naive_time:.4f} ms")
     
     # Time flash attention
-    flash_result, flash_time = time_cuda_function(flash_attention.forward, Q, K, V, O, l, m, M, N, d)
-    print(f"Flash attention average time: {flash_time:.4f} ms")
+    flash_result, flash_time = time_cuda_function(flash_attention.forward, Q, K, V, O, l, m, M, N, d, batch_size, n_head)
+    print(f"Flash attention time: {flash_time:.4f} ms")
     
     # Calculate speedup
     speedup = naive_time / flash_time

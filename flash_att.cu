@@ -15,8 +15,8 @@ __global__ void forward_kernel(float* Q, float *K, float *V, float* O, float* l,
 	int q_block_size = b_r * d;
 	int kv_block_size = b_c * d;
 
-	int tid = threadIdx.x;
-	//int tid = blockIdx.x * blockDim.x + threadIdx.x;
+	//int tid = threadIdx.x;
+	int tid = blockIdx.x * blockDim.x + threadIdx.x;
 	extern __shared__ float sram[];
 	
 	// allocate SRAM  partitions
@@ -47,7 +47,7 @@ __global__ void forward_kernel(float* Q, float *K, float *V, float* O, float* l,
 	
 	for(int i = 0; i < t_c; i++){
 		// Load K_j, V_j blocks from HBM to SRAM
-		for(int local_j = tid; local_j < kv_block_size; local_j += blockDim.x){
+		for(int local_j = tid; local_j < kv_block_size; local_j += blockDim.x * gridDim.x){
 			int index = i * kv_block_size +	local_j;	
 			if(index < N*d){
 				k_j[local_j] = K[index];
@@ -56,7 +56,7 @@ __global__ void forward_kernel(float* Q, float *K, float *V, float* O, float* l,
 		}	
 		for(int j = 0; j < t_r; j++){
 			// Load Q_i, O_i from HBM to SRAM
-			for(int local_k = tid; local_k < q_block_size; local_k += blockDim.x){
+			for(int local_k = tid; local_k < q_block_size; local_k += blockDim.x * gridDim.x){
 				int index = j * q_block_size + local_k;	
 				if(index < N*d){
 					q_i[local_k] = Q[index];
@@ -64,7 +64,7 @@ __global__ void forward_kernel(float* Q, float *K, float *V, float* O, float* l,
 				}	
 			}
 			// Load l_i, m_i from HBM to SRAM	
-			for(int local_k = tid; local_k < b_r; local_k += blockDim.x){
+			for(int local_k = tid; local_k < b_r; local_k += blockDim.x * gridDim.x){
 				int index = j * q_block_size + local_k;	
 				if(index < N){
 					l_i[local_k] = l[index];
@@ -151,13 +151,13 @@ __global__ void forward_kernel(float* Q, float *K, float *V, float* O, float* l,
 	}
 }
 
-torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::Tensor O, torch::Tensor l, torch::Tensor m, int M, int N, int d) {
+torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::Tensor O, torch::Tensor l, torch::Tensor m, int M, int N, int d, int batch_size, int n_head) {
     const int t_r = (N + b_r - 1) / b_r; // ceil(N/b_r)
     const int t_c = (N + b_c - 1) / b_c; // ceil(N/b_c)
 
     const float dot_prod_scale = 1/sqrt(d);
 
-    dim3 grid_size(1); // usually batch_size * num_head 
+    dim3 grid_size(batch_size, n_head); // usually batch_size * num_head 
     dim3 block_size(b_r);  
 
     // Calculate shared memory size
