@@ -1,5 +1,12 @@
 # Implementation of forward pass of Flash Attention V1
 
+## Setup
+```
+pip install -r requirements.txt
+sudo apt update
+sudo apt-get install ninja-build
+```
+
 ## Results
 ```
 Starting attention computations...
