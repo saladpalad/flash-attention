@@ -28,15 +28,15 @@ __global__ void forward_kernel(float* Q, float *K, float *V, float* O, float* l,
 	float* m_i = &sram[q_block_size + 2*kv_block_size + q_block_size + b_r];
 	float* S = &sram[q_block_size + 2*kv_block_size + q_block_size + 2*b_r];
 
-	float tid_max[b_r];
-	float tid_sum[b_r];
+	float row_max[b_r];
+	float row_sum[b_r];
 	float P[b_r * b_c];
 	float m_new[b_r];
 	float l_new[b_r];
 
     if (tid < b_r) {
-        tid_max[tid] = -INFINITY;
-        tid_sum[tid] = 0;
+        row_max[tid] = -INFINITY;
+        row_sum[tid] = 0;
 		m_new[tid] = 0;
 		l_new[tid] = 0;
     }
@@ -73,7 +73,7 @@ __global__ void forward_kernel(float* Q, float *K, float *V, float* O, float* l,
 			}
 			__syncthreads();
 
-			// S_ij = Q_i*K_j^T, m_ij = tidmax(S_ij)
+			// S_ij = Q_i*K_j^T, m_ij = rowmax(S_ij)
 			if (tid < b_r) {
 				float local_max = -INFINITY;
 				for(int c = 0; c < b_c; c++){
@@ -85,57 +85,65 @@ __global__ void forward_kernel(float* Q, float *K, float *V, float* O, float* l,
 					S[tid*b_c + c] = dot_prod;
 					local_max = max(dot_prod, local_max);
 				}
-				tid_max[tid] = local_max;
+				row_max[tid] = local_max;
 			}
 			
-			// P_ij = exp(S_ij - tid_max), l_ij = tidsum(P_ij)
+			// P_ij = exp(S_ij - row_max), l_ij = rowsum(P_ij)
 			if(tid < b_r){
 				float local_sum = 0;
 				for(int c = 0; c < b_c; c++){
 					int idx = tid*b_c + c;
 					float S_ij = S[idx];
-					float m_ij = tid_max[tid];
+					float m_ij = row_max[tid];
 					float exp_val = __expf(S_ij - m_ij);
 
 					P[idx] = exp_val;
 					local_sum += exp_val;
 				}
-				tid_sum[tid] = local_sum;
+				row_sum[tid] = local_sum;
 			}
 			
 			// compute m_new, l_new
 			if(tid < b_r){
 				float m_i_prev = m_i[tid];
-				float m_ij = tid_max[tid];
+				float m_ij = row_max[tid];
 				float m_i_new = max(m_i_prev, m_ij);
 				m_new[tid] = m_i_new;
 
 				float l_i_prev = l_i[tid];
-				float l_ij = tid_sum[tid];
+				float l_ij = row_sum[tid];
 				float l_i_new = __expf(m_i_prev - m_i_new) * l_i_prev + __expf(m_ij - m_i_new) * l_ij;
 				l_new[tid] = l_i_new;
 			}
 			
 			// Write O, l, m to HBM
 			if(tid < b_r) {
-				int global_tid = j * b_r + tid;
-				if(global_tid < N) {
+				int gid_r = j * b_r + tid; // N/b_r * b_r = N + threadIdx.x
+				if(gid_r < N) {
 					// Update l and m in global memory
-					l[global_tid] = l_new[tid];
-					m[global_tid] = m_new[tid];
+					l[gid_r] = l_new[tid];
+					m[gid_r] = m_new[tid];
 
 					// Update O in global memory
 					for(int k = 0; k < d; k++) {
-						float new_O_i = 0;
+						float PV = 0;
+						//#pragma unroll
 						for(int c = 0; c < b_c; c++) {
-						int global_col = i * b_c + c;
-							if(global_col < N) {
+						int gid_c = i * b_c + c; // N/b_c * b_c = N + c
+							if(gid_c < N) {
 								float v_j = v[c * d + k];
 								float P_ij = P[tid * b_c + c];
-								new_O_i += P_ij * v_j;
+								PV += P_ij * v_j;
 							}
 						}
-						O[global_tid * d + k] = (1.0f / l_new[tid]) * (l_i[tid] * __expf(m_i[tid] - m_new[tid]) * o_i[tid * d + k] + __expf(tid_max[tid] - m_new[tid]) * new_O_i);
+						float l_i_new = l_new[tid];
+						float l_i_prev = l_i[tid];
+						float m_i_prev = m_i[tid];
+						float m_i_new = m_new[tid];
+						float o_i_prev = o_i[tid * d + k];
+						float m_ij = row_max[tid];
+						
+						O[gid_r * d + k] = (1.0f / l_i_new) * (l_i_prev * __expf(m_i_prev - m_i_new) * o_i_prev + __expf(m_ij - m_i_new) * PV);
 					}
 				}
 			}
