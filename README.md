@@ -7,7 +7,12 @@ sudo apt update
 sudo apt-get install ninja-build
 ```
 
-## Results
+## Run
+```
+python3 main.py
+```
+
+## Results on 3060 Ti
 ```
 Starting attention computations...
 Naive attention time: 50.9389 ms
