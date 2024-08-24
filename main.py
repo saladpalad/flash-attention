@@ -23,6 +23,26 @@ def plot_and_save_attention_diff(flash_result, naive_result, filename='attention
     
     print(f"Plot saved as {filepath}")
 
+def time_cuda_function(func, *args, num_warmup=1, num_runs=3):
+    # Warmup
+    for _ in range(num_warmup):
+        _ = func(*args)
+    
+    # Timing
+    torch.cuda.synchronize()
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+    
+    start_event.record()
+    for _ in range(num_runs):
+        result = func(*args)
+    end_event.record()
+    
+    torch.cuda.synchronize()
+    elapsed_time = start_event.elapsed_time(end_event) / num_runs
+    return result, elapsed_time
+
+
 def naive_attn(q, k, v):
     att = (q @ k.transpose(-2, -1) * (1.0/math.sqrt(k.size(-1))))
     att = F.softmax(att, dim=-1)
@@ -39,13 +59,26 @@ def main():
     O = torch.zeros((N,d), device='cuda')
     l = torch.zeros((N,1), device='cuda')
     m = torch.full((N,1), -float('inf'), device='cuda')
-    print('hi')
-    naive_result = naive_attn(Q, K, V)
-    flash_result = flash_attention.forward(Q, K, V, O, l, m, M, N, d)
-    plot_and_save_attention_diff(flash_result, naive_result)
-    print("First few values of flash: ", flash_result[:])
-    print("First few values of naive: ", naive_result[:])
-    print('attn values sanity check:', torch.allclose(flash_result, naive_result, rtol=0, atol=1))
+    
+    print('Starting attention computations...')
+    
+    # Time naive attention
+    naive_result, naive_time = time_cuda_function(naive_attn, Q, K, V)
+    print(f"Naive attention average time: {naive_time:.4f} ms")
+    
+    # Time flash attention
+    flash_result, flash_time = time_cuda_function(flash_attention.forward, Q, K, V, O, l, m, M, N, d)
+    print(f"Flash attention average time: {flash_time:.4f} ms")
+    
+    # Calculate speedup
+    speedup = naive_time / flash_time
+    print(f"Speedup: {speedup:.2f}x")
+    
+    #plot_and_save_attention_diff(flash_result, naive_result)
+    
+    #print("First few values of flash: ", flash_result[:10])
+    #print("First few values of naive: ", naive_result[:10])
+    print('Attention values sanity check:', torch.allclose(flash_result, naive_result, rtol=0, atol=1))
 
 if __name__ == "__main__":
     main()
