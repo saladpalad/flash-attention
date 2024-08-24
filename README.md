@@ -1,6 +1,6 @@
 # Implementation of forward pass of Flash Attention V1
 
-### Results
+## Results
 ```
 Starting attention computations...
 Naive attention time: 50.9389 ms
