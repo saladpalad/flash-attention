@@ -50,6 +50,8 @@ def naive_attn(q, k, v):
     return y
 
 def main():
+    B = 8
+    H = 12
     M = 64
     N = 64
     d = 12
@@ -67,7 +69,7 @@ def main():
     print(f"Naive attention average time: {naive_time:.4f} ms")
     
     # Time flash attention
-    flash_result, flash_time = time_cuda_function(flash_attention.forward, Q, K, V, O, l, m, M, N, d)
+    flash_result, flash_time = time_cuda_function(flash_attention.forward, Q, K, V, O, l, m, M, N, d, B, H)
     print(f"Flash attention average time: {flash_time:.4f} ms")
     
     # Calculate speedup
